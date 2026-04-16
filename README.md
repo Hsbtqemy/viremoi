@@ -29,11 +29,15 @@ Un fichier texte plain, un nom de fichier par ligne. Les lignes vides et les com
 
 ```
 # Fichiers à déplacer
-rapport_2024.pdf
-photo_vacances.jpg
-# archive.zip  ← ignoré
+rapport_2024.pdf     ← extension précisée  : cherche exactement ce nom
+photo_vacances       ← sans extension      : cherche photo_vacances.* (jpg, png…)
+# archive.zip        ← ignoré
 notes.txt
 ```
+
+**Règle d'extension :**
+- Sans extension → le script cherche tout fichier dont le nom de base correspond (ex. `photo_vacances` trouve `photo_vacances.jpg`). Si plusieurs fichiers portent ce stem, l'entrée est marquée `ambiguous` et ignorée.
+- Avec extension → correspondance exacte uniquement.
 
 ## Statuts de sortie
 

@@ -91,18 +91,24 @@ def ask_log_file(default_dir: Path) -> Path:
     return Path(raw)
 
 
-def build_recursive_index(source_dir: Path) -> dict[str, list[Path]]:
+def build_index(
+    source_dir: Path, recursive: bool
+) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
     """
-    Construit un index {nom_de_fichier: [liste des chemins complets]}.
-    Utile pour chercher rapidement dans toute l'arborescence.
+    Construit deux index sur le dossier source :
+    - by_name : {nom_complet -> [chemins]}   utilisé quand une extension est précisée
+    - by_stem : {nom_sans_extension -> [chemins]}  utilisé sinon
     """
-    index: dict[str, list[Path]] = {}
+    by_name: dict[str, list[Path]] = {}
+    by_stem: dict[str, list[Path]] = {}
 
-    for path in source_dir.rglob("*"):
+    iterator = source_dir.rglob("*") if recursive else source_dir.iterdir()
+    for path in iterator:
         if path.is_file():
-            index.setdefault(path.name, []).append(path)
+            by_name.setdefault(path.name, []).append(path)
+            by_stem.setdefault(path.stem, []).append(path)
 
-    return index
+    return by_name, by_stem
 
 
 def write_log_csv(log_path: Path, rows: list[dict]) -> None:
@@ -139,7 +145,7 @@ def move_files(
     filenames = load_filenames(file_list_path)
     logs: list[dict] = []
 
-    recursive_index = build_recursive_index(source_dir) if recursive else None
+    by_name, by_stem = build_index(source_dir, recursive)
 
     moved = 0
     simulated = 0
@@ -150,50 +156,46 @@ def move_files(
     protected = 0
 
     for filename in filenames:
-        destination_file = destination_dir / filename
+        requested = Path(filename)
+        has_extension = requested.suffix != ""
 
-        # Recherche du fichier source
-        if recursive:
-            matches = recursive_index.get(filename, []) if recursive_index else []
-            if len(matches) == 0:
-                print(f"[ABSENT] {filename}")
-                missing += 1
-                logs.append({
-                    "requested_name": filename,
-                    "status": "missing",
-                    "source_path": "",
-                    "destination_path": str(destination_file),
-                    "detail": "Aucun fichier trouvé dans l'arborescence source.",
-                })
-                continue
-
-            if len(matches) > 1:
-                print(f"[AMBIGU] {filename} -> plusieurs fichiers portent ce nom")
-                ambiguous += 1
-                logs.append({
-                    "requested_name": filename,
-                    "status": "ambiguous",
-                    "source_path": " | ".join(str(p) for p in matches),
-                    "destination_path": str(destination_file),
-                    "detail": "Plusieurs fichiers trouvés avec le même nom.",
-                })
-                continue
-
-            source_file = matches[0]
-
+        # Lookup : par nom complet si extension précisée, par stem sinon
+        if has_extension:
+            matches = by_name.get(filename, [])
+            destination_file = destination_dir / filename
         else:
-            source_file = source_dir / filename
-            if not source_file.exists():
-                print(f"[ABSENT] {filename}")
-                missing += 1
-                logs.append({
-                    "requested_name": filename,
-                    "status": "missing",
-                    "source_path": str(source_file),
-                    "destination_path": str(destination_file),
-                    "detail": "Fichier absent du dossier source.",
-                })
-                continue
+            matches = by_stem.get(filename, [])
+            # Le nom destination reprend le nom complet du fichier trouvé (avec son extension)
+            destination_file = destination_dir / (matches[0].name if len(matches) == 1 else filename)
+
+        # Fichier introuvable
+        if len(matches) == 0:
+            print(f"[ABSENT] {filename}")
+            missing += 1
+            logs.append({
+                "requested_name": filename,
+                "status": "missing",
+                "source_path": "",
+                "destination_path": str(destination_file),
+                "detail": "Aucun fichier trouvé dans la source.",
+            })
+            continue
+
+        # Ambiguïté (plusieurs fichiers correspondent)
+        if len(matches) > 1:
+            print(f"[AMBIGU] {filename} -> {', '.join(p.name for p in matches)}")
+            ambiguous += 1
+            logs.append({
+                "requested_name": filename,
+                "status": "ambiguous",
+                "source_path": " | ".join(str(p) for p in matches),
+                "destination_path": str(destination_file),
+                "detail": "Plusieurs fichiers correspondent à ce nom.",
+            })
+            continue
+
+        source_file = matches[0]
+        destination_file = destination_dir / source_file.name
 
         # Protection contre le déplacement de fichiers système (liste, journal)
         if exclude and source_file.resolve() in exclude:
