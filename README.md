@@ -36,8 +36,32 @@ notes.txt
 ```
 
 **Règle d'extension :**
-- Sans extension → le script cherche tout fichier dont le nom de base correspond (ex. `photo_vacances` trouve `photo_vacances.jpg`). Si plusieurs fichiers portent ce stem, l'entrée est marquée `ambiguous` et ignorée.
+- Sans extension → le script cherche tout fichier dont le nom de base correspond (ex. `photo_vacances` trouve `photo_vacances.jpg`). Si plusieurs fichiers portent ce stem, une résolution interactive est proposée en fin de traitement (voir ci-dessous).
 - Avec extension → correspondance exacte uniquement.
+
+## Résolution des ambiguïtés
+
+Quand plusieurs fichiers correspondent à une même entrée, ils sont mis de côté et présentés ensemble à la fin du traitement principal :
+
+```
+============================================================
+  2 entrée(s) ambiguë(s) à résoudre
+
+  1. photo_vacances
+       1. /source/2023/photo_vacances.jpg
+       2. /source/2024/photo_vacances.png
+  2. rapport
+       1. /source/rapport.pdf
+       2. /source/rapport.docx
+
+  (t) Tout accepter — déplacer tous les fichiers correspondants
+  (r) Refuser tout  — ignorer toutes les entrées ambiguës
+  (c) Cas par cas   — choisir fichier par fichier
+```
+
+- **(t)** — tous les fichiers correspondants sont déplacés pour chaque entrée
+- **(r)** — toutes les entrées ambiguës sont ignorées et loguées
+- **(c)** — pour chaque entrée, entrer les numéros souhaités séparés par une virgule (`1,2` pour tout prendre, `0` pour ignorer)
 
 ## Statuts de sortie
 
@@ -46,7 +70,7 @@ notes.txt
 | `moved` | Fichier déplacé avec succès |
 | `dry_run` | Déplacement simulé (mode test) |
 | `missing` | Fichier introuvable dans la source |
-| `ambiguous` | Plusieurs fichiers portent ce nom (mode récursif uniquement) |
+| `ambiguous` | Entrée ambiguë refusée ou ignorée lors de la résolution |
 | `already_exists` | Fichier déjà présent dans la destination |
 | `protected` | Fichier ignoré car il s'agit de la liste source ou du journal CSV |
 | `error` | Erreur lors du déplacement |
