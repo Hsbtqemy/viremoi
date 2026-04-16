@@ -129,6 +129,166 @@ def write_log_csv(log_path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def _apply_move(
+    source_file: Path,
+    destination_file: Path,
+    requested_name: str,
+    dry_run: bool,
+    exclude: set[Path] | None,
+) -> tuple[dict, str]:
+    """
+    Tente de déplacer source_file vers destination_file.
+    Retourne (log_dict, outcome) où outcome est le nom du compteur à incrémenter.
+    """
+    if exclude and source_file.resolve() in exclude:
+        print(f"[PROTÉGÉ] {source_file.name} -> fichier système ignoré")
+        return {
+            "requested_name": requested_name,
+            "status": "protected",
+            "source_path": str(source_file),
+            "destination_path": str(destination_file),
+            "detail": "Fichier protégé (liste source ou journal CSV).",
+        }, "protected"
+
+    if destination_file.exists():
+        print(f"[DÉJÀ PRÉSENT] {source_file.name} -> ignoré")
+        return {
+            "requested_name": requested_name,
+            "status": "already_exists",
+            "source_path": str(source_file),
+            "destination_path": str(destination_file),
+            "detail": "Le fichier existe déjà dans le dossier destination.",
+        }, "skipped"
+
+    try:
+        if dry_run:
+            print(f"[TEST] {source_file} -> {destination_file}")
+            return {
+                "requested_name": requested_name,
+                "status": "dry_run",
+                "source_path": str(source_file),
+                "destination_path": str(destination_file),
+                "detail": "Simulation uniquement, aucun déplacement effectué.",
+            }, "simulated"
+        else:
+            shutil.move(str(source_file), str(destination_file))
+            print(f"[DÉPLACÉ] {source_file} -> {destination_file}")
+            return {
+                "requested_name": requested_name,
+                "status": "moved",
+                "source_path": str(source_file),
+                "destination_path": str(destination_file),
+                "detail": "Déplacement effectué avec succès.",
+            }, "moved"
+
+    except Exception as e:
+        print(f"[ERREUR] {source_file.name} -> {e}")
+        return {
+            "requested_name": requested_name,
+            "status": "error",
+            "source_path": str(source_file),
+            "destination_path": str(destination_file),
+            "detail": str(e),
+        }, "errors"
+
+
+def resolve_ambiguous(
+    pending: list[tuple[str, list[Path]]],
+    destination_dir: Path,
+    dry_run: bool,
+    exclude: set[Path] | None,
+) -> tuple[list[dict], dict[str, int]]:
+    """
+    Résout interactivement les entrées ambiguës collectées pendant le traitement.
+    Retourne (logs, counters).
+    """
+    print(f"\n{'='*60}")
+    print(f"  {len(pending)} entrée(s) ambiguë(s) à résoudre\n")
+    for i, (filename, matches) in enumerate(pending, 1):
+        print(f"  {i}. {filename}")
+        for j, p in enumerate(matches, 1):
+            print(f"       {j}. {p}")
+
+    print(f"\n  (t) Tout accepter — déplacer tous les fichiers correspondants")
+    print(f"  (r) Refuser tout  — ignorer toutes les entrées ambiguës")
+    print(f"  (c) Cas par cas   — choisir fichier par fichier")
+    while True:
+        choice = input("\nChoix : ").strip().lower()
+        if choice in {"t", "tout"}:
+            mode = "all"
+            break
+        if choice in {"r", "refuser"}:
+            mode = "none"
+            break
+        if choice in {"c", "cas"}:
+            mode = "one_by_one"
+            break
+        print("Réponds par t / r / c.")
+
+    logs: list[dict] = []
+    counters: dict[str, int] = {
+        "moved": 0, "simulated": 0, "skipped": 0,
+        "ambiguous": 0, "protected": 0, "errors": 0,
+    }
+
+    for filename, matches in pending:
+        if mode == "none":
+            counters["ambiguous"] += 1
+            logs.append({
+                "requested_name": filename,
+                "status": "ambiguous",
+                "source_path": " | ".join(str(p) for p in matches),
+                "destination_path": "",
+                "detail": "Refusé par l'utilisateur.",
+            })
+            continue
+
+        if mode == "all":
+            selected = matches
+
+        else:  # cas par cas
+            print(f"\n[AMBIGU] {filename}")
+            for j, p in enumerate(matches, 1):
+                print(f"  {j}. {p}")
+            raw = input("  Numéros à déplacer (séparés par virgule, 0 pour ignorer) : ").strip()
+
+            if not raw or raw == "0":
+                counters["ambiguous"] += 1
+                logs.append({
+                    "requested_name": filename,
+                    "status": "ambiguous",
+                    "source_path": " | ".join(str(p) for p in matches),
+                    "destination_path": "",
+                    "detail": "Ignoré par l'utilisateur.",
+                })
+                continue
+
+            try:
+                indices = [int(x.strip()) - 1 for x in raw.split(",") if x.strip()]
+                selected = [matches[i] for i in indices if 0 <= i < len(matches)]
+                if not selected:
+                    raise ValueError("Aucun indice valide.")
+            except (ValueError, IndexError):
+                print("  Sélection invalide, entrée ignorée.")
+                counters["ambiguous"] += 1
+                logs.append({
+                    "requested_name": filename,
+                    "status": "ambiguous",
+                    "source_path": " | ".join(str(p) for p in matches),
+                    "destination_path": "",
+                    "detail": "Sélection invalide, ignorée.",
+                })
+                continue
+
+        for source_file in selected:
+            destination_file = destination_dir / source_file.name
+            log, outcome = _apply_move(source_file, destination_file, filename, dry_run, exclude)
+            logs.append(log)
+            counters[outcome] += 1
+
+    return logs, counters
+
+
 def move_files(
     file_list_path: Path,
     source_dir: Path,
@@ -147,125 +307,58 @@ def move_files(
 
     by_name, by_stem = build_index(source_dir, recursive)
 
-    moved = 0
-    simulated = 0
-    missing = 0
-    skipped = 0
-    ambiguous = 0
-    errors = 0
-    protected = 0
+    counters: dict[str, int] = {
+        "moved": 0, "simulated": 0, "missing": 0, "skipped": 0,
+        "ambiguous": 0, "protected": 0, "errors": 0,
+    }
+
+    pending_ambiguous: list[tuple[str, list[Path]]] = []
 
     for filename in filenames:
-        requested = Path(filename)
-        has_extension = requested.suffix != ""
+        has_extension = Path(filename).suffix != ""
 
-        # Lookup : par nom complet si extension précisée, par stem sinon
-        if has_extension:
-            matches = by_name.get(filename, [])
-            destination_file = destination_dir / filename
-        else:
-            matches = by_stem.get(filename, [])
-            # Le nom destination reprend le nom complet du fichier trouvé (avec son extension)
-            destination_file = destination_dir / (matches[0].name if len(matches) == 1 else filename)
+        matches = by_name.get(filename, []) if has_extension else by_stem.get(filename, [])
 
-        # Fichier introuvable
         if len(matches) == 0:
             print(f"[ABSENT] {filename}")
-            missing += 1
+            counters["missing"] += 1
             logs.append({
                 "requested_name": filename,
                 "status": "missing",
                 "source_path": "",
-                "destination_path": str(destination_file),
+                "destination_path": str(destination_dir / filename),
                 "detail": "Aucun fichier trouvé dans la source.",
             })
             continue
 
-        # Ambiguïté (plusieurs fichiers correspondent)
         if len(matches) > 1:
             print(f"[AMBIGU] {filename} -> {', '.join(p.name for p in matches)}")
-            ambiguous += 1
-            logs.append({
-                "requested_name": filename,
-                "status": "ambiguous",
-                "source_path": " | ".join(str(p) for p in matches),
-                "destination_path": str(destination_file),
-                "detail": "Plusieurs fichiers correspondent à ce nom.",
-            })
+            pending_ambiguous.append((filename, matches))
             continue
 
         source_file = matches[0]
         destination_file = destination_dir / source_file.name
+        log, outcome = _apply_move(source_file, destination_file, filename, dry_run, exclude)
+        logs.append(log)
+        counters[outcome] += 1
 
-        # Protection contre le déplacement de fichiers système (liste, journal)
-        if exclude and source_file.resolve() in exclude:
-            print(f"[PROTÉGÉ] {filename} -> fichier système ignoré")
-            protected += 1
-            logs.append({
-                "requested_name": filename,
-                "status": "protected",
-                "source_path": str(source_file),
-                "destination_path": str(destination_file),
-                "detail": "Fichier protégé (liste source ou journal CSV).",
-            })
-            continue
-
-        # Vérification dossier cible
-        if destination_file.exists():
-            print(f"[DÉJÀ PRÉSENT] {filename} -> ignoré")
-            skipped += 1
-            logs.append({
-                "requested_name": filename,
-                "status": "already_exists",
-                "source_path": str(source_file),
-                "destination_path": str(destination_file),
-                "detail": "Le fichier existe déjà dans le dossier destination.",
-            })
-            continue
-
-        # Déplacement réel ou simulé
-        try:
-            if dry_run:
-                print(f"[TEST] {source_file} -> {destination_file}")
-                simulated += 1
-                logs.append({
-                    "requested_name": filename,
-                    "status": "dry_run",
-                    "source_path": str(source_file),
-                    "destination_path": str(destination_file),
-                    "detail": "Simulation uniquement, aucun déplacement effectué.",
-                })
-            else:
-                shutil.move(str(source_file), str(destination_file))
-                print(f"[DÉPLACÉ] {source_file} -> {destination_file}")
-                moved += 1
-                logs.append({
-                    "requested_name": filename,
-                    "status": "moved",
-                    "source_path": str(source_file),
-                    "destination_path": str(destination_file),
-                    "detail": "Déplacement effectué avec succès.",
-                })
-
-        except Exception as e:
-            print(f"[ERREUR] {filename} -> {e}")
-            errors += 1
-            logs.append({
-                "requested_name": filename,
-                "status": "error",
-                "source_path": str(source_file),
-                "destination_path": str(destination_file),
-                "detail": str(e),
-            })
+    # Résolution interactive des ambigus
+    if pending_ambiguous:
+        extra_logs, extra_counters = resolve_ambiguous(
+            pending_ambiguous, destination_dir, dry_run, exclude
+        )
+        logs.extend(extra_logs)
+        for key, val in extra_counters.items():
+            counters[key] = counters.get(key, 0) + val
 
     print("\nRésumé :")
-    print(f"  Déplacés          : {moved}")
-    print(f"  Simulés (test)    : {simulated}")
-    print(f"  Absents           : {missing}")
-    print(f"  Ambigus           : {ambiguous}")
-    print(f"  Ignorés           : {skipped}")
-    print(f"  Protégés          : {protected}")
-    print(f"  Erreurs           : {errors}")
+    print(f"  Déplacés          : {counters['moved']}")
+    print(f"  Simulés (test)    : {counters['simulated']}")
+    print(f"  Absents           : {counters['missing']}")
+    print(f"  Ambigus           : {counters['ambiguous']}")
+    print(f"  Ignorés           : {counters['skipped']}")
+    print(f"  Protégés          : {counters['protected']}")
+    print(f"  Erreurs           : {counters['errors']}")
 
     return logs
 
